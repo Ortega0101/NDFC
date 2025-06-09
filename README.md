@@ -11,7 +11,7 @@
 ## Клонировать репозиторий и перейти в него в командной строке:
 
 ```
-git clone https://github.com/Ortega0101/...
+git clone https://github.com/Ortega0101/NDFC
 ```
 
 ```
