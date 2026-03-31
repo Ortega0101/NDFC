@@ -1,6 +1,6 @@
 # Параметры запроса
 APPCENTER_URL = "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics"
-BASE_URL = "https://10.36.0.104"
+BASE_URL = "https://10.36.0.101"
 VERIFY_SSL = False
 
 # Имя фабрики

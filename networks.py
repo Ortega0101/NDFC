@@ -1,8 +1,9 @@
-from http import HTTPStatus
+import argparse
+import asyncio
 import logging
-import requests
 import sys
-from requests.exceptions import RequestException
+
+import aiohttp
 
 from auth import get_token
 from exceptions import ApiError
@@ -17,8 +18,26 @@ from parts import (
     VLANS,
 )
 
+# =========================
+# ACTION CONFIG
+# =========================
 
-def make_request(token, url, payload):
+ACTIONS = {
+    'create': {
+        'url': f'{BASE_URL}{APPCENTER_URL}/{FABRIC_NAME}/networks',
+        'payload_gen': networks_payload_gen
+    },
+    'attach': {
+        'url': f'{BASE_URL}{APPCENTER_URL}/{FABRIC_NAME}/networks/attachments',
+        'payload_gen': attach_payload_gen
+    }
+}
+
+# =========================
+# ASYNC REQUEST
+# =========================
+
+async def make_request(session, token, url, payload):
     """Обращается к API NDFC.
 
     Параметры:
@@ -30,88 +49,118 @@ def make_request(token, url, payload):
 
     Если ответ от API получить не удалось, выбрасывается исключение
     """
+
     headers = {
         'Content-Type': 'application/json',
-        'Authorization': f'{token}'
+        'Authorization': token
     }
-    request_params = {
-        'url': url,
-        'headers': headers,
-        'json': payload,
-        'verify': VERIFY_SSL,
-    }
-
     try:
-        logging.debug(f'Начинаем запрос к API: {url}')
+        async with session.post(
+            url,
+            json=payload,
+            headers=headers,
+            ssl=VERIFY_SSL
+            ) as resp:
+            text = await resp.text()
+            logging.info(f'Status Code: {resp.status}, Response: {text}')
+            if resp.status != 200:
+                raise ApiError(f'Ошибка API: {resp.status}, {text}')
+    except Exception as e:
+        logging.error(f'Ошибка запроса к {url}: {e}')
+        raise
 
-        response = requests.post(**request_params)
-        logging.info(
-            f'Status Code: {response.status_code}, {response.text}'
-        )
+# =========================
+# EXECUTE ACTION
+# =========================
 
-    except RequestException as error:
-        raise ConnectionError(
-            f'Ошибка обращения к API: {error}'
-        )
+async def execute_action(
+        session, action, network_name, vlan_id,token
+    ):
+    """Определяет payload и url 
+    для выполнения запроса к API в зависимости от действия.
 
-    if response.status_code != HTTPStatus.OK:
-        raise ApiError(
-            f'Ошибка API: {response.status_code}, {response.text}'
-        )
-
-
-def attach_network(network_name, vlan_id, token):
-    """Добавляет сети на коммутаторы.
-
-    Параметры:
-        network_name(str) - имя сети
-        vlan_id(int) - номер vlan
-        attach_payload - параметры добавляемой сети
-        url(str) - эндпоинт API
-    """
-    attach_payload = attach_payload_gen(network_name, vlan_id)
-
-    url = f'{BASE_URL}{APPCENTER_URL}/{FABRIC_NAME}/networks/attachments'
-
-    make_request(token, url, attach_payload)
-
-
-def create_network(username, password):
-    """Создает сети.
+    Инициирует запрос к API, вызывая функцию make_request
+    и передает ей подготовленные данные.
 
     Параметры:
+        action(str) - требуемое действие
         network_name(str) - имя сети
         vlan_id(int) - номер vlan
-        payload - параметры создаваемой сети
-        url(str) - эндпоинт API
-        username(str) - имя пользователя для авторизации в NDFC
-        password(str) - пароль пользователя для авторизации в NDFC
+        token(str) - токен для обращения к API
     """
-    url = f'{BASE_URL}{APPCENTER_URL}/{FABRIC_NAME}/networks'
-    for vlan_id in VLANS:
-        network_name = f'{NETWORK_NAME}-{str(vlan_id)}'
+    action_cfg = ACTIONS[action]
+
+    payload_gen = action_cfg['payload_gen']
+    url = action_cfg['url']
+
+    # задает payload взависимости от действия
+    if action == 'create':
         network_id = NETWORK_ID + vlan_id
+        payload = payload_gen(network_name, network_id, vlan_id)
+    if action == 'attach':
+        payload = payload_gen(network_name, vlan_id)
 
-        payload = networks_payload_gen(network_name, network_id, vlan_id)
+    await make_request(session, token, url, payload)
 
-        token = get_token(username, password)
+# =========================
+# PROCESS NETWORKS
+# =========================
 
-        try:
+async def process_networks(username, password, actions):
+    """Выполняет операции с сетями и получает токен авторизации.
 
-            make_request(token, url, payload)
-            attach_network(network_name, vlan_id, token)
+    Параметры:
+        action(str) - требуемое действие
+        network_name(str) - имя сети
+        vlan_id(int) - номер vlan
+        token(str) - токен для обращения к API
+    """
 
-        except Exception as error:
-            message = f'Сбой в работе: {error}'
-            logging.error(message)
+    token = get_token(username, password)
 
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for vlan_id in VLANS:
+            network_name = f'{NETWORK_NAME}-{vlan_id}'
+            logging.info(f'Обработка VLAN {vlan_id}')
+
+            for action in actions:
+                tasks.append(
+                    execute_action(
+                        session,
+                        action,
+                        network_name,
+                        vlan_id,
+                        token
+                    )
+                )
+
+        # запуск задач
+        await asyncio.gather(*tasks, return_exceptions=False)
+
+# =========================
+# CLI
+# =========================
 
 def main():
-    """Основная логика работы скрипта."""
+    parser = argparse.ArgumentParser(description='NDFC network automation')
+    parser.add_argument(
+        '--actions',
+        nargs='+',
+        choices=ACTIONS.keys(),
+        default=list(ACTIONS.keys()),
+        help='Список действий'
+    )
+    args = parser.parse_args()
+
     username = input('Введите логин: ')
     password = input('Введите пароль: ')
-    create_network(username, password)
 
+    asyncio.run(process_networks(username, password, args.actions))
+
+# =========================
+# ENTRYPOINT
+# =========================
 
 if __name__ == '__main__':
     logging.basicConfig(
